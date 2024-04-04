@@ -74,7 +74,7 @@ def play_with_frame_data(mocap_filepath):
 
     # vid_save = VideoSaver(width=width, height=height)
     while True:
-    # for i in range(5):
+        # for i in range(5):
         for config, vel in zip(data_config, data_vel): 
             tmp_val = config
             sim_state = sim.get_state()
@@ -93,4 +93,6 @@ def play_with_frame_data(mocap_filepath):
     # vid_save.close()
 
 if __name__ == '__main__':
-    play_with_frame_data("/home/kenji/Fyp/DeepMimic_mujoco/diffusion/logs/model-v2-frame-data/sampled_motions/motion_2.npy") 
+    play_with_frame_data(
+        "/home/kenji/Fyp/DeepMimic_mujoco/diffusion/logs/report-dissertation-3/sampled_motions/motion_2.npy"
+    )

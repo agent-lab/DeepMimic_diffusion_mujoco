@@ -138,6 +138,9 @@ class GaussianDiffusion:
         lambda_vel_rcxyz=0.,
         lambda_fc=0.,
     ):
+
+        self.mocap_dm = MocapDM()
+
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
         self.loss_type = loss_type
@@ -215,11 +218,21 @@ class GaussianDiffusion:
         # print('mse_loss_val', mse_loss_val)
         return mse_loss_val
 
+    def normalize_tensor(self, tensor, new_min=0.0, new_max=1.0):
+        # Find the original min and max of the tensor
+        orig_min = torch.min(tensor)
+        orig_max = torch.max(tensor)
+        # Normalize tensor to [0, 1]
+        normalized_tensor = (tensor - orig_min) / (orig_max - orig_min)
+        # Scale to [new_min, new_max]
+        scaled_tensor = normalized_tensor * (new_max - new_min) + new_min
+        return scaled_tensor
+    
     def unmasked_l2(self, a, b):
         # assuming a.shape == b.shape == bs, J, Jdim, seqlen
         loss = self.l2_loss(a, b)
-        loss = sum_flat(loss)
         loss = torch.nan_to_num(loss, nan=0.0)
+        loss = torch.sum(loss) 
         return loss
 
     def q_mean_variance(self, x_start, t):
@@ -318,9 +331,9 @@ class GaussianDiffusion:
         #     assert self.model_mean_type == ModelMeanType.START_X, 'This feature supports only X_start pred for mow!'
         #     assert model_output.shape == inpainting_mask.shape == inpainted_motion.shape
         #     model_output = (model_output * ~inpainting_mask) + (inpainted_motion * inpainting_mask)
-            # print('model_output', model_output.shape, model_output)
-            # print('inpainting_mask', inpainting_mask.shape, inpainting_mask[0,0,0,:])
-            # print('inpainted_motion', inpainted_motion.shape, inpainted_motion)
+        # print('model_output', model_output.shape, model_output)
+        # print('inpainting_mask', inpainting_mask.shape, inpainting_mask[0,0,0,:])
+        # print('inpainted_motion', inpainted_motion.shape, inpainted_motion)
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -355,7 +368,6 @@ class GaussianDiffusion:
             # print('self.posterior_variance', self.posterior_variance)
             # print('self.posterior_log_variance_clipped', self.posterior_log_variance_clipped)
             # print('self.model_var_type', self.model_var_type)
-
 
             model_variance = _extract_into_tensor(model_variance, t, x.shape)
             model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
@@ -1279,7 +1291,7 @@ class GaussianDiffusion:
                 terms["loss"] *= self.num_timesteps
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
-            # Not using this 
+            # Not using this
             # <IGNORE>
             # if self.model_var_type in [
             #     ModelVarType.LEARNED,
@@ -1323,18 +1335,25 @@ class GaussianDiffusion:
             # target_xyz, model_output_xyz = None, None
 
             # print("X_START", x_start.shape, x_start)
-            # print("MODEL_OUTPUT", model_output.shape, model_output)
+            # print("X_START SHAPE", x_start.squeeze(0).cpu().shape)
             target_mocap_dm.load_mocap_from_raw(x_start.squeeze(0).cpu())
 
             model_output = model_output.squeeze(0).cpu().detach().numpy()
             for frame in model_output:
                 frame[0] = 0.0167 # hard code duration
+            # print("MODEL_OUTPUT", model_output.shape, model_output)
             output_mocap_dm.load_mocap_from_raw(model_output)
 
             if self.lambda_rcxyz > 0.:
                 target_xyz = target_mocap_dm.data_config
+                target_xyz = torch.tensor(np.array(target_xyz))
+                target_xyz = self.normalize_tensor(target_xyz)
+
                 model_output_xyz = output_mocap_dm.data_config
-                terms["rcxyz_mse"] = self.unmasked_l2(torch.tensor(np.array(target_xyz)), torch.tensor(np.array(model_output_xyz))).to(x_start.device)
+                model_output_xyz = torch.tensor(np.array(model_output_xyz))
+                model_output_xyz = self.normalize_tensor(model_output_xyz)
+
+                terms["rcxyz_mse"] = self.unmasked_l2(target_xyz, model_output_xyz).to(x_start.device)
                 # print("rcxyz MSE", terms["rcxyz_mse"])
             #     target_xyz = get_xyz(target)  # [bs, nvertices(vertices)/njoints(smpl), 3, nframes]
             #     model_output_xyz = get_xyz(model_output)  # [bs, nvertices, 3, nframes]
@@ -1366,9 +1385,15 @@ class GaussianDiffusion:
             #                                      torch.zeros(pred_vel.shape, device=pred_vel.device),
             #                                      mask[:, :, :, 1:])
             if self.lambda_vel > 0.:
-                target_vel = target_mocap_dm.data_vel
-                model_output_vel = output_mocap_dm.data_vel
-                terms["vel_mse"] = self.unmasked_l2(torch.tensor(np.array(target_vel)), torch.tensor(np.array(model_output_vel))).to(x_start.device)
+                target_vel = torch.tensor(np.array(target_mocap_dm.data_vel))
+                model_output_vel = torch.tensor(np.array(output_mocap_dm.data_vel))
+
+                target_vel = self.normalize_tensor(target_vel)
+                model_output_vel = self.normalize_tensor(model_output_vel)
+
+                # print("Target vel", target_vel.shape, target_vel)
+                # print("Model output vel", model_output_vel.shape, model_output_vel)
+                terms["vel_mse"] = self.unmasked_l2(target_vel, model_output_vel).to(x_start.device)
                 # print("Vel MSE", terms["vel_mse"])
             #     target_vel = (target[..., 1:] - target[..., :-1])
             #     model_output_vel = (model_output[..., 1:] - model_output[..., :-1])
@@ -1380,7 +1405,7 @@ class GaussianDiffusion:
             #                 (self.lambda_vel * terms.get('vel_mse', 0.)) +\
             #                 (self.lambda_rcxyz * terms.get('rcxyz_mse', 0.)) + \
             #                 (self.lambda_fc * terms.get('fc', 0.))
-
+            # print(terms)
             terms["loss"] = terms["frame_loss"] + (self.lambda_vel * terms.get('vel_mse', 0.)) + (self.lambda_rcxyz * terms.get('rcxyz_mse', 0.))
         else:
             raise NotImplementedError(self.loss_type)
@@ -1550,7 +1575,6 @@ class GaussianDiffusion:
         print(np.linalg.norm(diff.cpu().detach().numpy().reshape((63, -1)), axis=0))
 
         return 0
-
 
     def _prior_bpd(self, x_start):
         """
